@@ -35,9 +35,9 @@
 #include "internal.h"
 #include "video.h"
 
-#define LUT_SIZE 8192
-
 #define INLINE av_always_inline
+
+#define LUT_SIZE 128
 
 static INLINE double min(double a, double b) { return (a <= b) ? a : b; }
 static INLINE double max(double a, double b) { return (a >= b) ? a : b; }
@@ -128,6 +128,7 @@ typedef struct LenscorrectionCtx {
     double maxerr, rstart;
     double outer_circle;
     double umax;
+    double* distortion_lut;
 } LenscorrectionCtx;
 
 #define FLAGS AV_OPT_FLAG_FILTERING_PARAM|AV_OPT_FLAG_VIDEO_PARAM
@@ -157,6 +158,7 @@ typedef struct ThreadData {
     double k1, k2;
     double r_px_1;
     double maxerr, rstart, umax;
+    double* distortion_lut;
 } ThreadData;
 
 static INLINE uint8_t sample(const int x, const int y, const int w, const int h, const int inlinesize, const uint8_t* indata)
@@ -177,6 +179,8 @@ static int filter_slice(AVFilterContext *ctx, void *arg, int job, int nb_jobs)
     const double maxerr = td->maxerr;
     const double umax = td->umax;
     const double rstart = td->rstart;
+
+    const double* distortion_lut = td->distortion_lut;
 
     const int w = td->w;
     const int h = td->h;
@@ -219,8 +223,17 @@ static int filter_slice(AVFilterContext *ctx, void *arg, int job, int nb_jobs)
             const double u_px = sqrt(off_x2 + off_y2);
             const double u = u_px * r_px_1_inv;
             uint8_t c = 0;
-            if (u < umax) {
-                r = distort(k1, k2, u, &ulast, r, maxerr);
+            int i = u / umax * LUT_SIZE;
+            if (i >= 0 && i + 1 < LUT_SIZE) {
+                double u0 = distortion_lut[i * 2];
+                double r0 = distortion_lut[i * 2 + 1];
+                double u1 = distortion_lut[(i + 1) * 2];
+                double r1 = distortion_lut[(i + 1) * 2 + 1];
+                double t = (u - u0) / (u1 - u0);
+
+                r = lerp(r0, r1, t);
+                //r = distort_divisions_math(k1, k2, u);
+                //r = distort(k1, k2, u, &ulast, r, maxerr);
                 /*            if (fabs(u - 1.0) < 0.0001) {
                                 av_log(NULL, AV_LOG_INFO, "u: %f, r: %f => %f
                    --- %f\n", u, r, r * r1_u_ratio, r1_u_ratio);
@@ -258,13 +271,13 @@ static int filter_slice(AVFilterContext *ctx, void *arg, int job, int nb_jobs)
             }
             // const char isvalid = x > 0 && x < w - 1 && y > 0 && y < h -
             // 1; uint8_t c = isvalid ? indata[y * inlinesize + x] : 0;
-/*            if (fabs(u_px - r_px_1) < maxerr * 10000 && plane == 2) {
+            if (fabs(u_px - r_px_1) < maxerr * 10000 && plane == 2) {
                 c = 255;
             }
             if (fabs(u - 1) < maxerr * 10 && plane == 1) {
                 c = 255;
             }
-*/
+
 /*            if (fabs(1 - (u_px / u_px_max)) < 0.01) {
                 c = (plane - 2) % 3 * 127;
             }
@@ -304,6 +317,9 @@ static int config_props(AVFilterLink *outlink) {
   rect->hsub = pixdesc->log2_chroma_w;
   rect->vsub = pixdesc->log2_chroma_h;
 
+  rect->k1 *= -1;
+  rect->k2 *= -1;
+
   const int w = inlink->w;
   const int h = inlink->h;
 
@@ -320,25 +336,88 @@ static int config_props(AVFilterLink *outlink) {
   rect->nb_planes = av_pix_fmt_count_planes(inlink->format);
 
 
+  const int outw = rect->outw;
+  const int outh = rect->outh;
+  
+  const double xcenter = rect->cx * w;
+  const double ycenter = rect->cy * h;
+  const double out_x_offset = round((outw - w) / 2.);
+  const double out_y_offset = round((outh - h) / 2.);
+  const double outxcenter = xcenter + out_x_offset;
+  const double outycenter = ycenter + out_y_offset;
+  // circle at r=1 is centered on center and touches nearest image edge
+  // shortest distance from center to image edge
+  const double r_px_1_inner = min(xcenter, min(w - xcenter, min(ycenter, h - ycenter)));
+  const double r_px_1_outer = max(xcenter, max(w - xcenter, max(ycenter, h - ycenter)));
+  //const double r_px_1 = lerp(r_px_1_inner, r_px_1_outer, rect->outer_circle);
+  const double r_px_1 = r_px_1_inner;
+  
+
+  // longest distance in distorted/src image
+  const double in_xmax = max(xcenter, w - xcenter);
+  const double in_ymax = max(ycenter, h - ycenter);
+  const double out_xmin = min(outxcenter, outw - outxcenter);
+  const double out_ymin = min(outycenter, outh - outycenter);
+  const double xlimit = min(in_xmax, out_xmin);
+  const double ylimit = min(in_ymax, out_ymin);
+  const double rmax_px = sqrt(xlimit * xlimit + ylimit * ylimit);
+  const double rmax = rmax_px / r_px_1;
+
   const double maxerr = rect->maxerr;
 
   //find umax
   {
       const double k1 = rect->k1;
       const double k2 = rect->k2;
+
+      double umax = distort_divisions_math(k1, k2, rmax_px / r_px_1);
+      
       double rlast;
       const double step = maxerr;
       double r = step;
       double u = distort_divisions_math(k1, k2, r);
       double ulast;
       do {
-          ulast = u;
-          rlast = r;
-          r += step;
-          u = distort_divisions_math(k1, k2, r);
-      } while (u > ulast && r < 5);
-      //printf("umax: %f\n", ulast);
+        ulast = u;
+        rlast = r;
+        r += step;
+        u = distort_divisions_math(k1, k2, r);
+        //printf("umax: %f %f\n", ulast, rlast);
+      } while (u > ulast && r < 5 && u <= umax);
+      umax = min(umax, ulast);
+      
       rect->umax = ulast;
+
+      double rmax = rlast;
+      double *lut = av_malloc_array(LUT_SIZE * 3, sizeof(double));
+
+      double u_r1 = distort_divisions_math(k1, k2, 1);
+
+      const double ustep = umax / LUT_SIZE;
+      {
+          double rstep = 1.0 / LUT_SIZE / 16;
+          av_log(NULL, AV_LOG_INFO, "%f, %f, %f\n", umax, ustep, rstep);
+          double r = 0;
+          double u = distort_divisions_math(k1, k2, r);
+          double target_u = u + ustep;
+          int iu = 0;
+          do {
+              av_log(NULL, AV_LOG_INFO, "LUT(%d): %f -> %f\n", iu, u, r);
+              lut[iu * 2] = u ;
+              lut[iu * 2 + 1] = r / u_r1;
+
+              while (u < target_u && u < umax && r < rmax) {
+                  r += rstep;
+                  u = distort_divisions_math(k1, k2, r);
+              }
+              iu += 1;
+              target_u += ustep;
+          } while (iu < LUT_SIZE);
+          lut[iu * 2] = umax;
+          lut[iu * 2 + 1] = rmax;
+      }
+      av_log(NULL, AV_LOG_INFO, "LUTDONE\n");
+      rect->distortion_lut = lut;
   }
   return 0;
 }
@@ -363,6 +442,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
     const double maxerr = rect->maxerr;
     const double rstart = rect->rstart;
     double umax = rect->umax;
+    const double* distortion_lut = rect->distortion_lut;
 
     for (plane = 0; plane < rect->nb_planes; ++plane) {
         const int hsub = plane == 1 || plane == 2 ? rect->hsub : 0;
@@ -380,9 +460,10 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
         const double outycenter = ycenter + out_y_offset;
         // circle at r=1 is centered on center and touches nearest image edge
         // shortest distance from center to image edge
-        const double r_px_1_inner = min(xcenter, min(w - xcenter, min(ycenter, h - ycenter))) - 0.5;
-        const double r_px_1_outer = max(xcenter, max(w - xcenter, max(ycenter, h - ycenter))) - 0.5;
-        const double r_px_1 = lerp(r_px_1_inner, r_px_1_outer, rect->outer_circle);
+        const double r_px_1_inner = min(xcenter, min(w - xcenter, min(ycenter, h - ycenter)));
+        const double r_px_1_outer = max(xcenter, max(w - xcenter, max(ycenter, h - ycenter)));
+        //const double r_px_1 = lerp(r_px_1_inner, r_px_1_outer, rect->outer_circle);
+        const double r_px_1 = r_px_1_inner;
 
         // longest distance in distorted/src image
         const double in_xmax = max(xcenter, w - xcenter);
@@ -409,7 +490,8 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
             .r_px_1 = r_px_1,
             .rstart = rstart,
             .umax = umax,
-            .maxerr = maxerr
+            .maxerr = maxerr,
+            .distortion_lut = distortion_lut
         };
 
         ctx->internal->execute(ctx, filter_slice, &td, NULL, FFMIN(outh, ff_filter_get_nb_threads(ctx)));
