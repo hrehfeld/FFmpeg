@@ -271,13 +271,13 @@ static int filter_slice(AVFilterContext *ctx, void *arg, int job, int nb_jobs)
             }
             // const char isvalid = x > 0 && x < w - 1 && y > 0 && y < h -
             // 1; uint8_t c = isvalid ? indata[y * inlinesize + x] : 0;
-            if (fabs(u_px - r_px_1) < maxerr * 10000 && plane == 2) {
+/*            if (fabs(u_px - r_px_1) < maxerr * 10000 && plane == 2) {
                 c = 255;
             }
             if (fabs(u - 1) < maxerr * 10 && plane == 1) {
                 c = 255;
             }
-
+*/
 /*            if (fabs(1 - (u_px / u_px_max)) < 0.01) {
                 c = (plane - 2) % 3 * 127;
             }
@@ -396,13 +396,13 @@ static int config_props(AVFilterLink *outlink) {
       const double ustep = umax / LUT_SIZE;
       {
           double rstep = 1.0 / LUT_SIZE / 16;
-          av_log(NULL, AV_LOG_INFO, "%f, %f, %f\n", umax, ustep, rstep);
+          //av_log(NULL, AV_LOG_INFO, "%f, %f, %f\n", umax, ustep, rstep);
           double r = 0;
           double u = distort_divisions_math(k1, k2, r);
           double target_u = u + ustep;
           int iu = 0;
           do {
-              av_log(NULL, AV_LOG_INFO, "LUT(%d): %f -> %f\n", iu, u, r);
+              //av_log(NULL, AV_LOG_INFO, "LUT(%d): %f -> %f\n", iu, u, r);
               lut[iu * 2] = u ;
               lut[iu * 2 + 1] = r / u_r1;
 
