@@ -60,8 +60,8 @@ static INLINE double distort_divisions_math(double k1, double k2, double r)
     /*       k1, k2, div, r); */
     /*   return 1; */
     /* } */
-    //const double u = r / div;
-    const double u = r * div;
+    const double u = r / div;
+    //const double u = r * div;
     //return pow(r, 1 + k1);
     return u;
 }
@@ -228,7 +228,7 @@ static int filter_slice(AVFilterContext *ctx, void *arg, int job, int nb_jobs)
             const double u = u_px * r_px_1_inv;
             uint8_t c = 0;
             int i = u * ustep_inv - 0.5;
-            if (i < LUT_SIZE) {
+            if (i < LUT_SIZE || 1) {
                 double u0 = 0;
                 double r0 = 0;
                 if (i > 0 && i < LUT_SIZE) {
@@ -246,8 +246,8 @@ static int filter_slice(AVFilterContext *ctx, void *arg, int job, int nb_jobs)
                 }
                 //else
                 {
-                  r = lerp(r0, r1, t);
-                  //r = distort_divisions_math(k1, k2, u);
+                  //r = lerp(r0, r1, t);
+                  r = distort_divisions_math(k1, k2, u);
                   //r = pow(u, 1/(1 + k1));
                   ulast = u;
                 }
@@ -288,15 +288,17 @@ static int filter_slice(AVFilterContext *ctx, void *arg, int job, int nb_jobs)
             else {
                 //av_log(NULL, AV_LOG_INFO, "u >= umax: %f %f\n", u, umax);
             }
-            if (fabs(u_px - r_px_1) < maxerr * 10000 && plane == 2) {
+/*            if (fabs(u_px - r_px_1) < maxerr * 10000 && plane == 2) {
                 c = 255;
             }
-            if (fabs(u - 1) < maxerr * 10 && plane == 1) {
+*/
+/*            if (fabs(u - 1) < maxerr * 10 && plane == 1) {
                 c = 255;
             }
             if (fabs(r - 1) < maxerr * 10 && plane == 0) {
                 c = 255;
             }
+*/
             *out++ = c;
         }
     }
